@@ -8,17 +8,22 @@ No new vendor calls. Uses stored hits + locked gold cells.
 
 from __future__ import annotations
 
+import argparse
 import json
+import os
 import re
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
 ROOT = Path(__file__).resolve().parents[2]
-RUN = ROOT / "data" / "company-news" / "official-runs" / "20260816T020806Z"
+# The official run directory is the default so the published chain stays runnable as-is;
+# `--run-dir` or NEWS_RUN_DIR points the scorer at another run (jevlin-backend fork).
+DEFAULT_RUN = ROOT / "data" / "company-news" / "official-runs" / "20260816T020806Z"
+RUN = Path(os.environ.get("NEWS_RUN_DIR") or DEFAULT_RUN)
 SAMPLES = ROOT / "data" / "company-news" / "samples.json"
 KS = (1, 5, 10)
-ENDPOINTS = (
+UPSTREAM_ENDPOINTS = (
     "nimble_lite", "nimble_lite_news", "nimble_standard",
     "tinyfish",
     "parallel_fast",
@@ -38,6 +43,22 @@ ENDPOINTS = (
     "tavily_basic",
     "tavily_advanced",
 )
+# Jevlin arms appended (jevlin-backend fork); not on the published board.
+JEVLIN_ENDPOINTS = (
+    "jevlin_fast",
+    "jevlin_balanced",
+    "jevlin_single",
+    "jevlin_fanout_raw",
+    "jevlin_fanout_merged",
+)
+ENDPOINTS = UPSTREAM_ENDPOINTS + JEVLIN_ENDPOINTS
+
+
+def resolve_run_dir(arg: str | os.PathLike[str] | None) -> Path:
+    """`--run-dir` beats NEWS_RUN_DIR beats the official stamp."""
+    if arg:
+        return Path(arg)
+    return Path(os.environ.get("NEWS_RUN_DIR") or DEFAULT_RUN)
 
 
 def _host(url: str) -> str:
@@ -247,6 +268,11 @@ def score_vendor(rows: list[dict[str, Any]], name: str) -> dict[str, Any]:
 
 
 def main() -> None:
+    global RUN
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--run-dir", default=None, help="Run directory (default: NEWS_RUN_DIR or the official stamp).")
+    args = parser.parse_args()
+    RUN = resolve_run_dir(args.run_dir)
     payload = json.loads((RUN / "run.json").read_text())
     samples = {s["id"]: s for s in json.loads(SAMPLES.read_text())}
     rows = []

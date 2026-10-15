@@ -8,3 +8,5 @@ venv/
 .DS_Store
 data/
 manifest.json
+# jevlin-backend fork: run artifacts, raw dumps and calibration work stay on the machine
+runs/

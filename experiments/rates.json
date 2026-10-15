@@ -1,0 +1,32 @@
+{
+  "_note": "USD per search for the DIRECT arms, used only to ESTIMATE direct-vendor search cost in scripts/jevlin_bench/measures.py. Each figure is the published PAYG list price for one request of up to 10 results. Jevlin arms are never priced from this file: the gateway meters every search and the runner records usage.cost_micros on the cost event (usd_observed). The two are reported side by side and never summed.",
+  "_filled_on": "2026-10-15",
+  "_sources": {
+    "exa_fast": "coding-agents fork experiments/rates.json (2026-10-15): https://exa.ai/pricing — Search API, Fast/Auto $7 per 1k requests; agrees with the harness's UNIT_COST_USD (2026-09-01)",
+    "parallel_fast": "coding-agents fork experiments/rates.json (2026-10-15): https://parallel.ai/pricing — Search API, Fast $1 per 1k requests with 10 results; agrees with UNIT_COST_USD",
+    "perplexity_low": "coding-agents fork experiments/rates.json (2026-10-15): https://docs.perplexity.ai/docs/getting-started/pricing — Search API $5 per 1k requests; agrees with UNIT_COST_USD",
+    "_others": "scripts/websearch/run_official_news_probe.py UNIT_COST_USD, list prices as of 2026-09-01 (the harness's own rate card); re-read the vendor pricing page before quoting"
+  },
+  "usd_per_search": {
+    "exa_fast": 0.007,
+    "exa_instant": 0.007,
+    "parallel_fast": 0.001,
+    "parallel_turbo": 0.001,
+    "parallel_basic": 0.005,
+    "perplexity_low": 0.005,
+    "nimble_lite": 0.0011,
+    "nimble_lite_news": 0.0011,
+    "nimble_standard": 0.005,
+    "brave": 0.005,
+    "brave_llm": 0.005,
+    "you_highlights_core": 0.005,
+    "you_highlights": 0.005,
+    "tinyfish": 0.0,
+    "firecrawl": 0.005,
+    "tavily_basic": 0.008,
+    "tavily_advanced": 0.016,
+    "serp": 0.003,
+    "linkup_fast": 0.005,
+    "linkup_standard": 0.005
+  }
+}

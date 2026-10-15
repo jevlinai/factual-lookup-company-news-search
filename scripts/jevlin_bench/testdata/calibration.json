@@ -1,0 +1,30 @@
+{
+  "_note": "Calibration set for the two-layer judge. Each item is a (question, gold, extracted answer) triple with the verdict a careful human grader gives under the upstream rule: correct only if every gold cell is present; synonyms and equivalent numeric/date forms allowed; no outside knowledge. Kinds cover exact, paraphrase, numeric and date equivalents, missing fact, contradiction, hedging, partial names, corporate aliases, multi-cell, and empty. Frozen with the rubric: changing an item is a judge change.",
+  "items": [
+    {"id": "exact-money", "kind": "exact", "question": "How much did MaxQ Medical raise in its latest funding round?", "gold": "$31.5 million", "answer": "$31.5 million", "expected": "correct"},
+    {"id": "exact-person", "kind": "exact", "question": "Who became the new CEO of Kettle Cuisine in August 2026?", "gold": "Peter Hall", "answer": "Peter Hall", "expected": "correct"},
+    {"id": "paraphrase-sentence", "kind": "paraphrase", "question": "How much did Higgsfield raise in its latest funding round?", "gold": "$400 million", "answer": "Higgsfield raised $400 million in its latest round, led by Example Capital.", "expected": "correct"},
+    {"id": "paraphrase-title", "kind": "paraphrase", "question": "Who became the new CEO of The Emmes Group in August 2026?", "gold": "Dr. Rama Kondru", "answer": "Rama Kondru was appointed chief executive officer.", "expected": "correct"},
+    {"id": "numeric-abbrev", "kind": "numeric_equivalent", "question": "How much did Onos Health raise in its latest funding round?", "gold": "$17 million", "answer": "$17M", "expected": "correct"},
+    {"id": "numeric-words", "kind": "numeric_equivalent", "question": "How much did Teragen Energy raise in its latest funding round?", "gold": "$6 million", "answer": "six million dollars", "expected": "correct"},
+    {"id": "numeric-long-form", "kind": "numeric_equivalent", "question": "How much did MaxQ Medical raise in its latest funding round?", "gold": "$31.5 million", "answer": "USD 31,500,000", "expected": "correct"},
+    {"id": "numeric-count", "kind": "numeric_equivalent", "question": "How many employees did Humacyte announce it was laying off?", "gold": "Approximately 45 employees", "answer": "about 45 staff", "expected": "correct"},
+    {"id": "date-order", "kind": "date_equivalent", "question": "On what date did Aspen Dental open the Punta Gorda practice?", "gold": "August 27, 2026", "answer": "27 August 2026", "expected": "correct"},
+    {"id": "date-iso", "kind": "date_equivalent", "question": "On what date did Aspen Dental open the Punta Gorda practice?", "gold": "August 27, 2026", "answer": "2026-08-27", "expected": "correct"},
+    {"id": "missing-amount", "kind": "missing_fact", "question": "How much did MaxQ Medical raise in its latest funding round?", "gold": "$31.5 million", "answer": "MaxQ Medical closed a Series B round in August 2026.", "expected": "incorrect"},
+    {"id": "missing-surname", "kind": "missing_fact", "question": "Who became the new CEO of Kettle Cuisine in August 2026?", "gold": "Peter Hall", "answer": "Peter", "expected": "incorrect"},
+    {"id": "contradiction-amount", "kind": "contradiction", "question": "How much did MaxQ Medical raise in its latest funding round?", "gold": "$31.5 million", "answer": "$30 million", "expected": "incorrect"},
+    {"id": "contradiction-person", "kind": "contradiction", "question": "Who became the new CEO of Kettle Cuisine in August 2026?", "gold": "Peter Hall", "answer": "Michael Hall", "expected": "incorrect"},
+    {"id": "contradiction-currency", "kind": "contradiction", "question": "How much did Higgsfield raise in its latest funding round?", "gold": "$400 million", "answer": "€400 million", "expected": "incorrect"},
+    {"id": "hedge", "kind": "hedge", "question": "Which company agreed to acquire OWYN?", "gold": "Good Foods", "answer": "Either Good Foods or Simply Good Foods; the snippets disagree.", "expected": "incorrect"},
+    {"id": "alias-suffix", "kind": "alias", "question": "Which company agreed to acquire IPS Group?", "gold": "Nayax Ltd.", "answer": "Nayax", "expected": "correct"},
+    {"id": "alias-credentials", "kind": "alias", "question": "Who became the new CEO of BioSkryb Genomics in August 2026?", "gold": "William E. Evans, Pharm.D.", "answer": "William Evans", "expected": "correct"},
+    {"id": "alias-nickname", "kind": "alias", "question": "Who became the new CEO of JinkoSolar in August 2026?", "gold": "Wei \"Dimi\" Du", "answer": "Dimi Du", "expected": "correct"},
+    {"id": "alias-state-abbrev", "kind": "alias", "question": "Where did Ursa Major open its newest manufacturing facility?", "gold": "Longmont, Colorado", "answer": "Longmont, CO", "expected": "correct"},
+    {"id": "partial-location", "kind": "missing_fact", "question": "Where did Aspen Dental open a new supported practice on August 27, 2026?", "gold": "26280 Jones Loop Road, Unit B, Punta Gorda, Florida", "answer": "Punta Gorda, Florida", "expected": "incorrect"},
+    {"id": "multi-cell-both", "kind": "multi_cell", "question": "Who was appointed CFO and how much did the company raise?", "gold": "Yaron Eldad; $12 million", "cells": ["Yaron Eldad", "$12 million"], "answer": "Yaron Eldad was named CFO after the $12M round.", "expected": "correct"},
+    {"id": "multi-cell-one", "kind": "multi_cell", "question": "Who was appointed CFO and how much did the company raise?", "gold": "Yaron Eldad; $12 million", "cells": ["Yaron Eldad", "$12 million"], "answer": "Yaron Eldad was named CFO.", "expected": "incorrect"},
+    {"id": "extra-context", "kind": "paraphrase", "question": "Which company agreed to acquire Claros?", "gold": "Navitas Semiconductor Corporation", "answer": "Navitas Semiconductor Corporation (Nasdaq: NVTS) agreed to acquire Claros for an undisclosed sum.", "expected": "correct"},
+    {"id": "empty", "kind": "empty", "question": "How much did MaxQ Medical raise in its latest funding round?", "gold": "$31.5 million", "answer": "", "expected": "incorrect"}
+  ]
+}

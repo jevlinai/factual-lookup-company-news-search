@@ -29,6 +29,7 @@ if str(ROOT / "scripts") not in sys.path:
     sys.path.insert(0, str(ROOT / "scripts"))
 
 from _shared import load_environment  # noqa: E402
+from websearch import jevlin_news  # noqa: E402
 from websearch.run_atomic_news_probe import (  # noqa: E402
     MAX_RESULTS,
     _dedupe,
@@ -148,6 +149,21 @@ ENDPOINT_ENV = {
 # from ENDPOINTS so resume/attach also removes any future retired Tavily tier
 # instead of carrying it into a newly written run.
 TAVILY_ENDPOINTS = frozenset({"tavily_basic", "tavily_advanced"})
+
+# ── Jevlin arms (jevlin-backend fork). Appended after the upstream roster so every
+# upstream entry keeps its position; the adapters above are untouched. The arms are
+# not on the published board. See scripts/websearch/jevlin_news.py.
+UPSTREAM_ENDPOINTS = ENDPOINTS
+ENDPOINTS = ENDPOINTS + jevlin_news.ARMS
+ENDPOINT_MAP.update(jevlin_news.ENDPOINT_MAP)
+ENDPOINT_ENV.update(jevlin_news.ENDPOINT_ENV)
+UNIT_COST_USD.update(jevlin_news.UNIT_COST_USD)
+
+
+def endpoint_family(name: str) -> str:
+    """Backend family for the consecutive-failure guard: all Jevlin arms share one gateway
+    and one account, so a 429/402 storm on one is a storm on all; direct vendors stand alone."""
+    return "jevlin" if jevlin_news.is_jevlin(name) else name
 
 
 def _now() -> str:
@@ -428,6 +444,9 @@ def _parse_nimble(payload: Any) -> list[dict[str, Any]]:
 
 def call_endpoint(name: str, question: str, case: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     del case
+    if jevlin_news.is_jevlin(name):
+        # The question goes out verbatim, once, like every other branch below.
+        return jevlin_news.call_jevlin(name, question, http=_http, hit=_hit, dedupe=_dedupe, max_results=MAX_RESULTS)
     if name in {"nimble_lite", "nimble_lite_news", "nimble_standard"}:
         raw = _http(
             method="POST",
@@ -664,30 +683,38 @@ def run_case(client: Any, model: str, case: dict[str, Any], endpoints: list[str]
         raw_path = _write_raw(raw_dir, case["id"], name, raw)
         events: list[dict[str, Any]] = []
         billed = raw["ok"] or (raw.get("status_code") not in {401, 402, 403} and raw.get("status_code") is not None)
-        events.append(
-            {
-                "kind": "vendor_search",
-                "vendor": name,
-                "usd": UNIT_COST_USD[name] if billed else 0.0,
-                "ok": raw["ok"],
-                "status_code": raw.get("status_code"),
-                "latency_ms": raw.get("latency_ms"),
-            }
-        )
+        vendor_meta = raw.get("vendor_meta") if isinstance(raw.get("vendor_meta"), dict) else None
+        search_event: dict[str, Any] = {
+            "kind": "vendor_search",
+            "vendor": name,
+            "usd": UNIT_COST_USD[name] if billed else 0.0,
+            "ok": raw["ok"],
+            "status_code": raw.get("status_code"),
+            "latency_ms": raw.get("latency_ms"),
+        }
+        if vendor_meta is not None:
+            # Jevlin's observed metering, beside the flat `usd`, never added to it.
+            search_event.update(jevlin_news.cost_event_fields(vendor_meta))
+        events.append(search_event)
         extracted = {"answer": "", "cited_url": ""}
-        extract_tokens = {"input_tokens": 0, "output_tokens": 0}
-        if raw["ok"]:
-            extracted, extract_tokens = extract_answer(client, model, question, hits)
-        gold, score_tokens = score_gold(client, model, question, expected, cells, extracted["answer"])
-        events.append(
-            {
-                "kind": "openai",
-                "vendor": name,
-                "usd": round(_openai_usd(extract_tokens) + _openai_usd(score_tokens), 6),
-                "input_tokens": extract_tokens["input_tokens"] + score_tokens["input_tokens"],
-                "output_tokens": extract_tokens["output_tokens"] + score_tokens["output_tokens"],
-            }
-        )
+        if client is None:
+            # --extractor none: the search protocol runs unchanged; extraction and judging
+            # are deferred to scripts/jevlin_bench/cc_extract.py and judge.py. No OpenAI call.
+            gold: dict[str, Any] = {"correct": None, "cells_hit": 0, "note": "deferred: not extracted or judged yet"}
+        else:
+            extract_tokens = {"input_tokens": 0, "output_tokens": 0}
+            if raw["ok"]:
+                extracted, extract_tokens = extract_answer(client, model, question, hits)
+            gold, score_tokens = score_gold(client, model, question, expected, cells, extracted["answer"])
+            events.append(
+                {
+                    "kind": "openai",
+                    "vendor": name,
+                    "usd": round(_openai_usd(extract_tokens) + _openai_usd(score_tokens), 6),
+                    "input_tokens": extract_tokens["input_tokens"] + score_tokens["input_tokens"],
+                    "output_tokens": extract_tokens["output_tokens"] + score_tokens["output_tokens"],
+                }
+            )
         block = {
             "endpoint": name,
             "latency_ms": raw.get("latency_ms"),
@@ -703,6 +730,8 @@ def run_case(client: Any, model: str, case: dict[str, Any], endpoints: list[str]
             "source": source_metrics(hits, gold_url),
             "answer_in_excerpt": answer_in_excerpt(hits, cells),
         }
+        if vendor_meta is not None:
+            block["vendor_meta"] = vendor_meta
         return name, block, events
 
     with ThreadPoolExecutor(max_workers=len(endpoints)) as pool:
@@ -801,6 +830,32 @@ def _merge_row(existing: dict[str, Any], incoming: dict[str, Any]) -> dict[str, 
     return merged
 
 
+def _retryable_failure(block: dict[str, Any]) -> bool:
+    """A stored search that failed for a reason the vendor did not decide: rate limit, server
+    error, or no HTTP response at all. 4xx other than 429 is the vendor's answer and stands."""
+    if not block.get("error"):
+        return False
+    status = block.get("status_code")
+    return status is None or status == 429 or (isinstance(status, int) and status >= 500)
+
+
+def _update_family_failures(counts: dict[str, int], row: dict[str, Any], endpoints: list[str], limit: int) -> str | None:
+    """Advance the per-family consecutive-failure counts for one case; return an abort reason or None."""
+    vendors = row.get("vendors") or {}
+    by_family: dict[str, list[dict[str, Any]]] = {}
+    for name in endpoints:
+        by_family.setdefault(endpoint_family(name), []).append(vendors.get(name) or {})
+    for family, blocks in by_family.items():
+        if blocks and all(block.get("error") for block in blocks):
+            counts[family] = counts.get(family, 0) + 1
+        else:
+            counts[family] = 0
+        if counts[family] >= limit:
+            last = next((block.get("error") for block in blocks if block.get("error")), "")
+            return f"{counts[family]} consecutive cases with every {family} search failed; last: {str(last)[:200]}"
+    return None
+
+
 def _parse_endpoints(raw: str) -> list[str]:
     if not raw.strip():
         return list(ENDPOINTS)
@@ -811,16 +866,16 @@ def _parse_endpoints(raw: str) -> list[str]:
     return names
 
 
-def _required_env(endpoints: list[str]) -> list[str]:
-    keys = ["OPENAI_API_KEY"]
+def _required_env(endpoints: list[str], extractor: str = "openai") -> list[str]:
+    keys = ["OPENAI_API_KEY"] if extractor == "openai" else []
     for name in endpoints:
         keys.extend(ENDPOINT_ENV[name])
     return sorted(set(keys))
 
 
-def _missing_env(endpoints: list[str]) -> list[str]:
+def _missing_env(endpoints: list[str], extractor: str = "openai") -> list[str]:
     missing: list[str] = []
-    for key in _required_env(endpoints):
+    for key in _required_env(endpoints, extractor):
         if key == "YDC_API_KEY":
             if not _first_env("YDC_API_KEY", "YOU_API_KEY", "YOU_KEY"):
                 missing.append("YDC_API_KEY")
@@ -891,6 +946,14 @@ def _cost_rollups(rows: list[dict[str, Any]]) -> dict[str, Any]:
             bucket["output_tokens"] += int(event.get("output_tokens") or 0)
         bucket["calls"] += 1
         bucket["usd"] = round(bucket["usd"] + float(event.get("usd") or 0), 6)
+        if "usd_observed" in event:
+            # Metered arms: observed spend kept in its own fields, never folded into `usd`.
+            bucket.setdefault("usd_observed", 0.0)
+            bucket.setdefault("cached_calls", 0)
+            bucket.setdefault("pending_calls", 0)
+            bucket["usd_observed"] = round(bucket["usd_observed"] + float(event.get("usd_observed") or 0), 6)
+            bucket["cached_calls"] += 1 if event.get("cache_hit") else 0
+            bucket["pending_calls"] += 1 if int(event.get("pending") or 0) > 0 else 0
     return {
         "unit_cost_usd": UNIT_COST_USD,
         "by_endpoint": by_kind,
@@ -912,13 +975,43 @@ def main() -> None:
         default=None,
         help="Existing official-run directory; only call requested endpoints missing on each case",
     )
+    # ── jevlin-backend fork additions. Defaults reproduce the upstream behaviour exactly.
+    parser.add_argument(
+        "--extractor",
+        choices=("openai", "none"),
+        default="openai",
+        help="openai: the upstream inline gpt extractor + judge (needs OPENAI_API_KEY). "
+        "none: search only; extraction and judging are deferred to scripts/jevlin_bench.",
+    )
+    parser.add_argument(
+        "--run-dir",
+        type=Path,
+        default=None,
+        help="Directory for a fresh run (default: data/company-news/official-runs/<UTC stamp>). Must not exist.",
+    )
+    parser.add_argument("--case-gap-s", type=float, default=0.4, help="Pause between cases (upstream: 0.4).")
+    parser.add_argument(
+        "--abort-after-search-errors",
+        type=int,
+        default=0,
+        help="Stop after this many consecutive cases in which every endpoint of one backend family failed "
+        "(a 429/402 storm). 0 disables (upstream behaviour). Exit status 3.",
+    )
+    parser.add_argument(
+        "--attach-retry-errors",
+        action="store_true",
+        help="With --attach: treat a stored vendor block whose search failed with a retryable status "
+        "(429, 5xx, or no HTTP response) as missing, so it is searched again.",
+    )
     args = parser.parse_args()
     if args.resume and args.attach:
         raise SystemExit("use --resume or --attach, not both")
+    if args.run_dir and (args.resume or args.attach):
+        raise SystemExit("--run-dir names a fresh run; use --resume/--attach alone for an existing one")
 
     load_environment()
     endpoints = _parse_endpoints(args.endpoints)
-    missing = _missing_env(endpoints)
+    missing = _missing_env(endpoints, args.extractor)
     if missing:
         raise SystemExit(f"missing env: {missing}")
 
@@ -950,7 +1043,9 @@ def main() -> None:
         pending = []
         for case in cases:
             row = by_id.get(case.get("id"))
-            have = set((row or {}).get("vendors") or {})
+            vendors = (row or {}).get("vendors") or {}
+            have = {name for name, block in vendors.items()
+                    if not (args.attach_retry_errors and _retryable_failure(block))}
             needed = [name for name in endpoints if name not in have]
             if needed:
                 pending.append(case)
@@ -967,47 +1062,55 @@ def main() -> None:
         cases = [c for c in cases if c.get("id") not in done]
         print(f"resume {out_dir} already={len(done)} remaining={len(cases)}")
     else:
-        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        out_dir = OUT_ROOT / stamp
+        if args.run_dir is not None:
+            out_dir = args.run_dir.resolve()
+            if out_dir.exists():
+                raise SystemExit(f"--run-dir {out_dir} exists; use --attach or --resume to continue it")
+        else:
+            stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+            out_dir = OUT_ROOT / stamp
         rows = []
     out_dir.mkdir(parents=True, exist_ok=True)
     raw_dir = out_dir / "raw_calls"
     raw_dir.mkdir(parents=True, exist_ok=True)
+    OUT_ROOT.mkdir(parents=True, exist_ok=True)
     latest = OUT_ROOT / "latest"
     if latest.is_symlink() or latest.exists():
         latest.unlink()
-    latest.symlink_to(out_dir.name)
+    latest.symlink_to(out_dir.name if out_dir.parent == OUT_ROOT else out_dir)
 
     print(
-        f"official=true model={args.model} endpoints={endpoints} "
-        f"cases={len(cases)} already={len(rows)} out={out_dir}"
+        f"official=true model={args.model if args.extractor == 'openai' else None} extractor={args.extractor} "
+        f"endpoints={endpoints} cases={len(cases)} already={len(rows)} out={out_dir}"
     )
 
-    client = _openai()
+    client = _openai() if args.extractor == "openai" else None
     partial = out_dir / "run.partial.json"
 
     def _write(path: Path, summary: dict[str, Any] | None) -> None:
-        path.write_text(
-            json.dumps(
-                {
-                    "created_at": _now(),
-                    "protocol": "official_atomic_single_query",
-                    "dataset": str(args.samples),
-                    "model": args.model,
-                    "endpoints": [n for n in ENDPOINTS if any(n in (r.get("gold_scores") or {}) for r in rows)],
-                    "endpoint_map": ENDPOINT_MAP,
-                    "summary": summary,
-                    "cost": _cost_rollups(rows),
-                    "cases": rows,
-                },
-                indent=2,
-            )
-            + "\n"
-        )
+        payload: dict[str, Any] = {
+            "created_at": _now(),
+            "protocol": "official_atomic_single_query",
+            "dataset": str(args.samples),
+            "model": args.model if args.extractor == "openai" else None,
+            "endpoints": [n for n in ENDPOINTS if any(n in (r.get("gold_scores") or {}) for r in rows)],
+            "endpoint_map": ENDPOINT_MAP,
+            "summary": summary,
+            "cost": _cost_rollups(rows),
+            "cases": rows,
+        }
+        if args.extractor != "openai":
+            payload["extractor"] = {"kind": "deferred", "note": "search-only pass; see jevlin_bench/cc_extract.py"}
+        path.write_text(json.dumps(payload, indent=2) + "\n")
 
+    # Consecutive cases in which every endpoint of a family failed. A failed search is data
+    # for one case; a run of them is a vendor or gateway refusing every call, and every
+    # further case would be judged on nothing.
+    family_failures: dict[str, int] = {}
+    aborted: str | None = None
     for i, case in enumerate(cases):
         if i:
-            time.sleep(0.4)
+            time.sleep(args.case_gap_s)
         needed = attach_missing.get(case["id"], endpoints)
         row = run_case(client, args.model, case, needed, raw_dir)
         if args.attach:
@@ -1028,6 +1131,12 @@ def main() -> None:
         sys.stdout.flush()
         if (i + 1) % 2 == 0 or i + 1 == len(cases):
             _write(partial, summarize(rows))
+        if args.abort_after_search_errors:
+            aborted = _update_family_failures(family_failures, row, needed, args.abort_after_search_errors)
+            if aborted:
+                _write(partial, summarize(rows))
+                print(f"ABORTING: {aborted}", flush=True)
+                raise SystemExit(3)
 
     summary = summarize(rows)
     cost = _cost_rollups(rows)

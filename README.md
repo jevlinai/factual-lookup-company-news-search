@@ -163,6 +163,33 @@ These are the general web-search arms on the live factual-lookup board:
 with a 30 req/min cap. The runner can carry arms that are not yet on the
 published board.
 
+### Jevlin arms (`jevlin-backend` fork only; not on the published board)
+
+This fork (`jevlinai/factual-lookup-company-news-search`, branch `jevlin-backend`, from
+upstream `7f9f017`) adds five arms for the Jevlin search gateway, registered through the
+same `call_endpoint` branch mechanism and the same hit shape, cap and dedup as every vendor
+above. The upstream adapters are untouched. Jevlin core is vendored in
+`scripts/jevlin_core/` from `jevlinai/web-search-for-coding-agents@jevlin-backend` at
+`f01b032`.
+
+| CLI id | Call |
+|---|---|
+| `jevlin_fast` | POST /v1/search tier=fast view=merged max_results=10 · merged order |
+| `jevlin_balanced` | POST /v1/search tier=balanced view=merged max_results=10 · merged order |
+| `jevlin_single` | POST /v1/search providers=[`JEVLIN_SINGLE_PROVIDER`] view=merged · provider order |
+| `jevlin_fanout_raw` | POST /v1/search tier=balanced providers=`JEVLIN_PROVIDERS` · round-robin, exact-URL dedup |
+| `jevlin_fanout_merged` | POST /v1/search tier=balanced providers=`JEVLIN_PROVIDERS` · merged order |
+
+Jevlin meters each search; the runner records the observed `usage.cost_micros` on the cost
+event (`usd_observed`) beside the flat `usd` (nominal 0.0) and never sums the two. The fork
+also adds `--extractor none` (search only; no OpenAI call), `--run-dir`, `--case-gap-s`,
+`--abort-after-search-errors` and `--attach-retry-errors` to the runner, `--run-dir` /
+`NEWS_RUN_DIR` to the rejudge and score scripts, and under `scripts/jevlin_bench/` a
+tool-isolated Claude Code extractor, a two-layer judge (deterministic + Codex/Claude), a
+calibration harness and a measures script. Scores produced that way are an **internal
+Claude/Codex adaptation**, never official OpenBenchmarks scoring. Design and run records live
+in the private `jevlin-benchmark-docs` repository.
+
 ## Run
 
 ```bash
@@ -196,6 +223,7 @@ same vendors are measured on two other jobs:
 
 ## Changelog
 
+- **2026-10-16 (fork).** `jevlin-backend`: five Jevlin arms, `--extractor none`, run-dir parametrisation of the official chain, public-dataset builder with SHA-256 freeze, tool-isolated Claude Code extractor, two-layer judge, measures. Upstream adapters and methodology unchanged.
 - **2026-09-15.** Added Nimble Search lite/general, lite/news, and standard/general to the existing table and runner roster. All use `full_content=false`, 10 results, and descriptions only; no Extract call. Added You highlights + `knowledge=core` on the 300-question Company News benchmark; published accuracy is 92.0%, versus 90.7% with highlights alone. Updated the You roster and request contracts.
 
 ## License

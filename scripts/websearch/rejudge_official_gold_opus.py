@@ -32,11 +32,22 @@ from websearch.bedrock_judge import (  # noqa: E402
     load_bedrock_environment,
 )
 
-RUN_DIR = ROOT / "data" / "company-news" / "official-runs" / "20260816T020806Z"
+# The official run directory stays the default; `--run-dir` / NEWS_RUN_DIR retarget the
+# chain at another run (jevlin-backend fork). Nothing else about the chain changes.
+DEFAULT_RUN_DIR = ROOT / "data" / "company-news" / "official-runs" / "20260816T020806Z"
+RUN_DIR = Path(os.environ.get("NEWS_RUN_DIR") or DEFAULT_RUN_DIR)
 RUN_PATH = RUN_DIR / "run.json"
 SAMPLES = ROOT / "data" / "company-news" / "samples.json"
 MANIFEST = ROOT / "data" / "company-news" / "manifest.json"
 CKPT_DIR = RUN_DIR / "rejudge-opus5"
+
+
+def set_run_dir(path: str | os.PathLike[str]) -> Path:
+    global RUN_DIR, RUN_PATH, CKPT_DIR
+    RUN_DIR = Path(path)
+    RUN_PATH = RUN_DIR / "run.json"
+    CKPT_DIR = RUN_DIR / "rejudge-opus5"
+    return RUN_DIR
 
 EXTRACT_MODEL = "gpt-5.6-terra"
 JUDGE_LABEL = "claude-opus-5"
@@ -201,7 +212,10 @@ def main() -> int:
     parser.add_argument("--apply", action="store_true", help="Write checkpoints back onto run.json.")
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--limit", type=int, default=0)
+    parser.add_argument("--run-dir", default=None, help="Run directory (default: NEWS_RUN_DIR or the official stamp).")
     args = parser.parse_args()
+    if args.run_dir:
+        set_run_dir(args.run_dir)
     load_bedrock_environment()
     jobs = _jobs()
     done = sum(1 for job in jobs if _ckpt_path(job.case_id, job.endpoint).exists())
