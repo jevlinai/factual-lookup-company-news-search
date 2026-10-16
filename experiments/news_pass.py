@@ -43,6 +43,7 @@ if str(ROOT / "scripts") not in sys.path:
     sys.path.insert(0, str(ROOT / "scripts"))
 
 import jevlin_core  # noqa: E402
+from _shared import load_environment  # noqa: E402
 
 DEFAULT_DIRECT = ("exa_fast", "perplexity_low", "parallel_fast")
 DEFAULT_JEVLIN = ("jevlin_balanced", "jevlin_fast", "jevlin_single", "jevlin_fanout_raw", "jevlin_fanout_merged")
@@ -188,6 +189,9 @@ def describe(invocations: list[Invocation], *, gap_min: float, cases: int) -> st
 
 
 def main(argv: list[str] | None = None) -> int:
+    # The harness runner loads .env itself; load it here too so the extract, judge and measures
+    # children inherit it (CODEX_BIN, CACHE_GAP_MIN) — the file is the one place a run is configured.
+    load_environment()
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--run-dir", type=Path, required=True)
     parser.add_argument("--direct", default=",".join(DEFAULT_DIRECT))

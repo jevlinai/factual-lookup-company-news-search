@@ -53,6 +53,7 @@ ROOT = HERE.parents[1]
 if str(ROOT / "scripts") not in sys.path:
     sys.path.insert(0, str(ROOT / "scripts"))
 
+from _shared import load_environment  # noqa: E402
 from jevlin_bench import cc_isolated  # noqa: E402
 
 KS = (1, 5, 10)
@@ -868,6 +869,7 @@ def apply(run_dir: Path, *, backend_label: str) -> dict[str, Any]:
 
 
 def main(argv: list[str] | None = None) -> int:
+    load_environment()  # .env: CODEX_BIN for the default --codex-bin; the backends rebuild their own child environments
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--run-dir", type=Path, required=True)
     parser.add_argument("--samples", type=Path, default=ROOT / "data" / "company-news" / "samples.json")

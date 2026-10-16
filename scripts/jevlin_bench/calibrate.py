@@ -27,6 +27,7 @@ ROOT = HERE.parents[1]
 if str(ROOT / "scripts") not in sys.path:
     sys.path.insert(0, str(ROOT / "scripts"))
 
+from _shared import load_environment  # noqa: E402
 from jevlin_bench import judge  # noqa: E402
 
 CALIBRATION = HERE / "testdata" / "calibration.json"
@@ -143,6 +144,7 @@ def to_markdown(report: dict[str, Any]) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
+    load_environment()  # .env: CODEX_BIN for the default --codex-bin
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--backend", choices=("none", "codex", "claude-code", "fake"), default="none")
     parser.add_argument("--items", type=Path, default=CALIBRATION)
