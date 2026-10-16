@@ -88,7 +88,10 @@ if argv == ["--version"]:
     print("codex-cli 0.0.0-fake")
     sys.exit(0)
 n = len(list(CALLS.glob("*.json"))) + 1
-(CALLS / f"{{n:03d}}.json").write_text(json.dumps({{"argv": argv, "env": dict(os.environ), "cwd": os.getcwd()}}))
+# The real `codex exec` blocks on a non-/dev/null stdin that is not a TTY; record what it was given.
+stdin_is_devnull = os.fstat(0).st_rdev == os.stat(os.devnull).st_rdev
+(CALLS / f"{{n:03d}}.json").write_text(json.dumps({{"argv": argv, "env": dict(os.environ), "cwd": os.getcwd(),
+                                                   "stdin_is_devnull": stdin_is_devnull}}))
 behaviour = {behaviour!r}
 out = Path(argv[argv.index("--output-last-message") + 1]) if "--output-last-message" in argv else None
 prompt = argv[-1]
@@ -107,8 +110,14 @@ if behaviour == "garbage":
 if behaviour == "crash":
     print("codex exploded", file=sys.stderr)
     sys.exit(2)
+# The `--json` event stream of codex-cli 0.160.0, abridged; "web" adds the tool item a judge must not use.
+print(json.dumps({{"type": "thread.started", "thread_id": "fake"}}))
+print(json.dumps({{"type": "turn.started"}}))
+if behaviour == "web":
+    print(json.dumps({{"type": "item.completed", "item": {{"id": "item_1", "type": "web_search", "query": "gold fact"}}}}))
+print(json.dumps({{"type": "item.completed", "item": {{"id": "item_2", "type": "agent_message", "text": json.dumps(verdict)}}}}))
+print(json.dumps({{"type": "turn.completed", "usage": {{"input_tokens": 1000, "cached_input_tokens": 500, "output_tokens": 50}}}}))
 if out: out.write_text(json.dumps(verdict))
-print("codex event log line")
 '''
 
 

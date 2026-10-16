@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -52,8 +53,28 @@ def run_calibration(items: list[dict[str, Any]], backend: judge.Backend | None, 
             "a_methods": [c["method"] for c in gold["layer_a"].get("cells") or []],
             "b_justification": (b_block or {}).get("justification") if b_block else None,
             "b_cost_usd": ((b_block or {}).get("meta") or {}).get("total_cost_usd") if b_block else None,
+            # The backend's own accounting: for codex, tool items (must be 0), tokens, latency, version.
+            "b_meta": {k: ((b_block or {}).get("meta") or {}).get(k)
+                       for k in ("backend", "model", "effort", "codex_version", "tool_items", "items", "usage", "elapsed_ms")} if b_block else None,
         })
     return {"rows": rows, "summary": summarize(rows, backend)}
+
+
+def _backend_accounting(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    metas = [r["b_meta"] for r in rows if r.get("b_meta") and r["b_meta"].get("elapsed_ms") is not None]
+    if not metas:
+        return {"calls": 0}
+    usages = [m["usage"] for m in metas if isinstance(m.get("usage"), dict)]
+    elapsed = sorted(int(m["elapsed_ms"]) for m in metas)
+    return {
+        "calls": len(metas),
+        "tool_items": sum(int(m.get("tool_items") or 0) for m in metas),
+        "model": metas[0].get("model"),
+        "effort": metas[0].get("effort"),
+        "codex_version": metas[0].get("codex_version"),
+        "tokens": {key: sum(int(u.get(key) or 0) for u in usages) for key in ("input_tokens", "cached_input_tokens", "output_tokens")} if usages else None,
+        "elapsed_ms": {"median": elapsed[len(elapsed) // 2], "max": elapsed[-1]},
+    }
 
 
 def _rate(flags: list[bool | None]) -> dict[str, Any]:
@@ -86,6 +107,7 @@ def summarize(rows: list[dict[str, Any]], backend: judge.Backend | None) -> dict
         "disagreements": [r["id"] for r in rows if r["ab_agree"] is False],
         "layer_a_misses": [r["id"] for r in rows if not r["a_matches_expected"]],
         "layer_b_misses": [r["id"] for r in rows if r["b_matches_expected"] is False],
+        "layer_b_accounting": _backend_accounting(rows),
         "by_kind": by_kind,
     }
 
@@ -103,7 +125,14 @@ def to_markdown(report: dict[str, Any]) -> str:
     for key in ("layer_a_vs_expected", "layer_b_vs_expected", "a_vs_b", "final_vs_expected"):
         r = s[key]
         lines.append(f"| {key} | {r['n']} | {r['agree']} | {r['rate'] if r['rate'] is not None else '—'} |")
-    lines += ["", f"Layer B failures: {s['layer_b_failures']}. Layer B API-equivalent cost: ${s['layer_b_cost_usd']}.",
+    acc = s.get("layer_b_accounting") or {}
+    accounting = f"Layer B calls: {acc.get('calls', 0)}."
+    if acc.get("calls"):
+        tokens = acc.get("tokens") or {}
+        accounting += (f" Tool items used by the judge: **{acc.get('tool_items', 0)}**. Model `{acc.get('model')}` (effort {acc.get('effort')}), "
+                       f"`{acc.get('codex_version')}`. Tokens in/cached/out: {tokens.get('input_tokens')}/{tokens.get('cached_input_tokens')}/"
+                       f"{tokens.get('output_tokens')}. Latency median/max: {acc['elapsed_ms']['median']}/{acc['elapsed_ms']['max']} ms.")
+    lines += ["", f"Layer B failures: {s['layer_b_failures']}. Layer B API-equivalent cost: ${s['layer_b_cost_usd']}. {accounting}",
               f"Layer A misses: {', '.join(s['layer_a_misses']) or 'none'}. Layer B misses: {', '.join(s['layer_b_misses']) or 'none'}. "
               f"A/B disagreements: {', '.join(s['disagreements']) or 'none'}.", "",
               "| id | kind | expected | A | B | final | B justification |", "|---|---|---|---|---|---|---|"]
@@ -118,7 +147,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--backend", choices=("none", "codex", "claude-code", "fake"), default="none")
     parser.add_argument("--items", type=Path, default=CALIBRATION)
     parser.add_argument("--out", type=Path, default=None, help="Directory for calibration-<backend>-<stamp>.json/.md")
-    parser.add_argument("--codex-bin", default="codex")
+    parser.add_argument("--codex-bin", default=os.environ.get("CODEX_BIN") or "codex", help="default $CODEX_BIN or `codex` on PATH")
     parser.add_argument("--claude-bin", default="claude")
     parser.add_argument("--workdir", type=Path, default=ROOT / "runs" / "calibration-work")
     args = parser.parse_args(argv)

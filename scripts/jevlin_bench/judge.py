@@ -8,8 +8,8 @@ Replaces the upstream Opus-on-Bedrock judge with:
             every run. Also scores AR@K on the stored snippets (per-snippet, same matcher).
   Layer B — an independent semantic judge behind a small backend interface:
               codex        `codex exec` (OpenAI model family via the ChatGPT login, the
-                           preferred independent family) — flags pending live verification,
-                           see CodexBackend;
+                           preferred independent family) — tool-less and config-independent,
+                           verified live 2026-10-16 on codex-cli 0.160.0, see CodexBackend;
               claude-code  a tool-isolated `claude -p` session (cc_isolated) — the labelled
                            fallback; it is the extractor's family, so the independence the
                            upstream chain has is lost and every report says so;
@@ -442,26 +442,64 @@ class FakeBackend:
         return BackendResult(True, dict(self.script or {"verdict": "incorrect", "cells_hit": 0, "justification": "fake"}), meta={"backend": "fake"})
 
 
+CODEX_DEFAULT_MODEL = "gpt-6.1-sol"
+CODEX_DEFAULT_EFFORT = "medium"
+# Item types in the `--json` event stream that mean the model reached outside its prompt. A verdict
+# formed with any of them is not a judgement of the extracted text and is discarded.
+CODEX_BREACH_ITEM_TYPES = ("web_search", "mcp_tool_call", "command_execution", "file_change")
+# Everything that turns `codex exec` into a tool-less, config-independent judge. Order matters only
+# for readability; every flag was accepted by codex-cli 0.160.0.
+CODEX_LOCK_FLAGS = (
+    "--ignore-user-config",   # the operator's config.toml (model, plugins, MCP servers) stays out
+    "--ignore-rules",         # and so do user/project execpolicy .rules files
+    "--ephemeral",            # no session rollout under ~/.codex/sessions per judged row
+    "-c", "web_search=disabled",  # web search is ON by default; the sandbox does not govern it
+    "--disable", "apps",          # the bundled ChatGPT-apps connector (search_service.web_run)
+    "--disable", "browser_use",
+    "--disable", "computer_use",
+    "--disable", "hooks",
+    "--disable", "code_mode_host",  # the shell tool fails closed: nothing runs in the workdir
+)
+
+
 class CodexBackend:
     """`codex exec` — OpenAI model family through the operator's ChatGPT login; no OPENAI_API_KEY ever
     reaches the process (the environment is rebuilt without any *_API_KEY).
 
-    Flags (Codex CLI 0.11x, from its documented `exec` surface): `--skip-git-repo-check` (the workdir is
-    not a repository), `--sandbox read-only` (no writes, no network tools), `-C <workdir>`,
-    `--output-schema <file>` (structured final message), `--output-last-message <file>` (where the
-    final message is written), optional `-m <model>`; the prompt is the positional argument.
-    LIVE VERIFICATION PENDING: the installed binary was non-operational on the preparation host
-    (`codex --version` -> ENOENT), so argv and output parsing were exercised only against a fake.
+    Verified live on 2026-10-16 against the Codex CLI bundled with the ChatGPT desktop app
+    (`codex-cli 0.160.0`, `/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex`).
+    Three findings from the probes shape this backend:
+
+    * `codex exec` reads stdin whenever stdin is not a TTY ("Reading additional input from
+      stdin...") and an open pipe blocks it indefinitely — the first probe sat for six hours.
+      The child therefore gets /dev/null as stdin.
+    * Web search is on by default and `--sandbox read-only` does not touch it. With
+      `-c web_search=disabled` the model reached for the bundled ChatGPT-apps connector instead
+      (`codex_apps` → `search_service.web_run`), so `apps` is disabled too, with browser use,
+      computer use and hooks; `--ignore-user-config` keeps the operator's plugins and MCP servers
+      out. The read-only sandbox blocks the network for shell commands ("Could not resolve host")
+      but lets them read world-readable files, so the shell is closed as well (`code_mode_host`
+      off) and every tool item in the `--json` event stream is counted: a row judged with any
+      web_search, MCP call, command or file change fails rather than being trusted.
+    * Model and reasoning effort are pinned on the command line (`-m`, `model_reasoning_effort`)
+      so the judge does not follow whatever the operator's config.toml says that day.
+
+    Remaining flags: `--skip-git-repo-check` (the workdir is not a repository), `-C <workdir>`,
+    `--output-schema <file>` (structured final message), `--output-last-message <file>`; the
+    prompt is the positional argument. A sanity probe takes ≈ 11–15 s and ≈ 21k input tokens.
     """
 
     label = "codex"
     family = "openai"
     independent_of_extractor = True
 
-    def __init__(self, codex_bin: str = "codex", model: str | None = None, timeout_s: int = 300) -> None:
+    def __init__(self, codex_bin: str = "codex", model: str | None = None, timeout_s: int = 300,
+                 effort: str | None = None) -> None:
         self.codex_bin = codex_bin
-        self.model = model or (os.environ.get("CODEX_JUDGE_MODEL") or "").strip() or None
+        self.model = model or (os.environ.get("CODEX_JUDGE_MODEL") or "").strip() or CODEX_DEFAULT_MODEL
+        self.effort = effort or (os.environ.get("CODEX_JUDGE_EFFORT") or "").strip() or CODEX_DEFAULT_EFFORT
         self.timeout_s = timeout_s
+        self.version: str | None = None
 
     @staticmethod
     def available(codex_bin: str = "codex") -> tuple[bool, str]:
@@ -478,12 +516,42 @@ class CodexBackend:
 
     def argv(self, *, prompt: str, schema_path: Path, out_path: Path, workdir: Path) -> list[str]:
         exe = shutil.which(self.codex_bin) if not os.path.isabs(self.codex_bin) else self.codex_bin
-        argv = [exe or self.codex_bin, "exec", "--skip-git-repo-check", "--sandbox", "read-only", "-C", str(workdir),
-                "--output-schema", str(schema_path), "--output-last-message", str(out_path)]
-        if self.model:
-            argv += ["-m", self.model]
+        argv = [exe or self.codex_bin, "exec", "--json", "--skip-git-repo-check", "--sandbox", "read-only", "-C", str(workdir),
+                *CODEX_LOCK_FLAGS, "--output-schema", str(schema_path), "--output-last-message", str(out_path),
+                "-m", self.model, "-c", f"model_reasoning_effort={self.effort}"]
         argv.append(prompt)
         return argv
+
+    @staticmethod
+    def read_events(stdout: str) -> dict[str, Any]:
+        """Summarise a `--json` event stream: item counts by type, token usage, error messages and
+        the last agent message (the fallback when the last-message file is missing)."""
+        items: dict[str, int] = {}
+        errors: list[str] = []
+        usage: dict[str, Any] | None = None
+        last_text = ""
+        for line in (stdout or "").splitlines():
+            line = line.strip()
+            if not line.startswith("{"):
+                continue
+            try:
+                event = json.loads(line)
+            except ValueError:
+                continue
+            item = event.get("item") if isinstance(event.get("item"), dict) else None
+            if event.get("type") == "item.completed" and item:
+                kind = str(item.get("type") or "")
+                items[kind] = items.get(kind, 0) + 1
+                if kind == "agent_message":
+                    last_text = str(item.get("text") or "")
+                elif kind == "error":
+                    errors.append(str(item.get("message") or "")[:300])
+            elif event.get("type") in ("error", "turn.failed"):
+                errors.append(json.dumps(event)[:300])
+            if event.get("type") == "turn.completed" and isinstance(event.get("usage"), dict):
+                usage = event["usage"]
+        breaches = {k: v for k, v in items.items() if k in CODEX_BREACH_ITEM_TYPES}
+        return {"items": items, "breaches": breaches, "errors": errors, "usage": usage, "last_text": last_text}
 
     @staticmethod
     def env() -> dict[str, str]:
@@ -503,25 +571,37 @@ class CodexBackend:
         argv = self.argv(prompt=prompt, schema_path=schema_path, out_path=out_path, workdir=workdir)
         env = self.env()
         assert not cc_isolated.forbidden_env_keys(env), "codex environment carries an API key"
+        if self.version is None:
+            ok, status = self.available(self.codex_bin)
+            self.version = status if ok else f"unavailable: {status}"
         started = time.perf_counter()
         try:
-            proc = subprocess.run(argv, cwd=workdir, env=env, capture_output=True, text=True, timeout=self.timeout_s, check=False)
+            # stdin must be closed: `codex exec` reads a non-TTY stdin for "additional input" and an
+            # inherited pipe never ends.
+            proc = subprocess.run(argv, cwd=workdir, env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                                  timeout=self.timeout_s, check=False)
             stdout, stderr, returncode = proc.stdout, proc.stderr, proc.returncode
         except subprocess.TimeoutExpired:
             stdout, stderr, returncode = "", f"codex timed out after {self.timeout_s}s", 124
         except OSError as exc:
             stdout, stderr, returncode = "", f"{type(exc).__name__}: {exc}", 127
         elapsed_ms = int((time.perf_counter() - started) * 1000)
-        meta = {"backend": "codex", "model": self.model, "returncode": returncode, "elapsed_ms": elapsed_ms,
+        events = self.read_events(stdout)
+        meta = {"backend": "codex", "model": self.model, "effort": self.effort, "codex_version": self.version,
+                "returncode": returncode, "elapsed_ms": elapsed_ms, "usage": events["usage"], "items": events["items"],
+                "tool_items": sum(events["breaches"].values()), "event_errors": events["errors"][:5],
                 "stderr": (stderr or "")[:1000], "stdout_tail": (stdout or "")[-1000:]}
         text = out_path.read_text() if out_path.exists() else ""
-        parsed = _parse_json_object(text) or _parse_json_object(stdout)
-        rate_limited = bool(cc_isolated.RATE_LIMIT_RE.search((stderr or "") + (stdout or ""))) and returncode != 0
+        parsed = _parse_json_object(text) or _parse_json_object(events["last_text"])
+        rate_limited = parsed is None and bool(cc_isolated.RATE_LIMIT_RE.search((stderr or "") + (stdout or "")))
         if returncode != 0 and parsed is None:
             return BackendResult(False, None, error=f"codex exit {returncode}: {(stderr or stdout or '').strip()[:300]}", meta=meta,
                                  rate_limited=rate_limited)
         if parsed is None:
-            return BackendResult(False, None, error="no JSON object in codex output", meta=meta)
+            return BackendResult(False, None, error="no JSON object in codex output", meta=meta, rate_limited=rate_limited)
+        if events["breaches"]:
+            used = ", ".join(f"{k}×{v}" for k, v in sorted(events["breaches"].items()))
+            return BackendResult(False, None, error=f"isolation breach: codex used {used}", meta=meta)
         return BackendResult(True, parsed, meta=meta)
 
 
@@ -798,7 +878,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--endpoints", default="")
     parser.add_argument("--ids", default="")
     parser.add_argument("--limit", type=int, default=0)
-    parser.add_argument("--codex-bin", default="codex")
+    parser.add_argument("--codex-bin", default=os.environ.get("CODEX_BIN") or "codex",
+                        help="codex executable; default $CODEX_BIN or `codex` on PATH (the ChatGPT app bundles one under "
+                             "/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex)")
     parser.add_argument("--codex-model", default=None)
     parser.add_argument("--claude-bin", default="claude")
     parser.add_argument("--claude-model", default=cc_isolated.DEFAULT_MODEL)

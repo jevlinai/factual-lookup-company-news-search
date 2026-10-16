@@ -170,15 +170,55 @@ class LayerBAndPolicy(unittest.TestCase):
 
 class Backends(unittest.TestCase):
     def test_codex_argv_shape_and_clean_env(self):
-        backend = judge.CodexBackend(codex_bin="/usr/local/bin/codex", model="gpt-x")
+        backend = judge.CodexBackend(codex_bin="/usr/local/bin/codex", model="gpt-x", effort="low")
         argv = backend.argv(prompt="P", schema_path=Path("/t/schema.json"), out_path=Path("/t/out.json"), workdir=Path("/t"))
-        self.assertEqual(argv[:2], ["/usr/local/bin/codex", "exec"])
-        for flag in ("--skip-git-repo-check", "--sandbox", "--output-schema", "--output-last-message", "-C", "-m"):
+        self.assertEqual(argv[:3], ["/usr/local/bin/codex", "exec", "--json"])
+        for flag in ("--skip-git-repo-check", "--sandbox", "--output-schema", "--output-last-message", "-C", "-m",
+                     "--ignore-user-config", "--ignore-rules", "--ephemeral"):
             self.assertIn(flag, argv)
         self.assertEqual(argv[argv.index("--sandbox") + 1], "read-only")
+        self.assertEqual(argv[argv.index("-m") + 1], "gpt-x")
+        self.assertIn("model_reasoning_effort=low", argv)
+        self.assertIn("web_search=disabled", argv)
+        disabled = [argv[i + 1] for i, a in enumerate(argv) if a == "--disable"]
+        self.assertEqual(set(disabled), {"apps", "browser_use", "computer_use", "hooks", "code_mode_host"})
         self.assertEqual(argv[-1], "P")
         with patch.dict(os.environ, {"OPENAI_API_KEY": "sk-leak", "JEVLIN_API_KEY": "j"}):
             self.assertEqual(judge.cc_isolated.forbidden_env_keys(judge.CodexBackend.env()), [])
+
+    def test_codex_defaults_pin_model_and_effort(self):
+        with patch.dict(os.environ, {"CODEX_JUDGE_MODEL": "", "CODEX_JUDGE_EFFORT": ""}):
+            backend = judge.CodexBackend()
+        self.assertEqual((backend.model, backend.effort), (judge.CODEX_DEFAULT_MODEL, judge.CODEX_DEFAULT_EFFORT))
+        with patch.dict(os.environ, {"CODEX_JUDGE_MODEL": "gpt-env", "CODEX_JUDGE_EFFORT": "high"}):
+            backend = judge.CodexBackend()
+        self.assertEqual((backend.model, backend.effort), ("gpt-env", "high"))
+
+    def test_codex_event_stream_is_summarised(self):
+        stream = "\n".join([
+            "codex-cli banner line",
+            json.dumps({"type": "thread.started", "thread_id": "t"}),
+            json.dumps({"type": "item.completed", "item": {"type": "command_execution", "command": "ls"}}),
+            json.dumps({"type": "item.completed", "item": {"type": "error", "message": "Code Mode is unavailable"}}),
+            json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": '{"verdict": "correct"}'}}),
+            json.dumps({"type": "turn.completed", "usage": {"input_tokens": 7, "output_tokens": 1}}),
+        ])
+        summary = judge.CodexBackend.read_events(stream)
+        self.assertEqual(summary["items"], {"command_execution": 1, "error": 1, "agent_message": 1})
+        self.assertEqual(summary["breaches"], {"command_execution": 1})
+        self.assertEqual(summary["errors"], ["Code Mode is unavailable"])
+        self.assertEqual(summary["usage"], {"input_tokens": 7, "output_tokens": 1})
+        self.assertEqual(summary["last_text"], '{"verdict": "correct"}')
+
+    def test_codex_tool_use_fails_the_row(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            backend = judge.CodexBackend(codex_bin=str(make_fake_codex(Path(tmp) / "bin", "web")))
+            out = judge.judge_answer(question="Q", expected="x", cells=[{"value": "x"}], answer="x", backend=backend, workdir=Path(tmp) / "w")
+            self.assertFalse(out["layer_b"]["ok"])
+            self.assertIn("isolation breach", out["layer_b"]["error"])
+            self.assertIn("web_search", out["layer_b"]["error"])
+            self.assertTrue(out["judge_failed"])
+            self.assertEqual(out["layer_b"]["meta"]["tool_items"], 1)
 
     def test_codex_backend_against_fake(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -195,7 +235,11 @@ class Backends(unittest.TestCase):
             self.assertTrue(out["layer_b"]["independent_of_extractor"])
             call = recorded_calls(Path(tmp) / "bin")[0]
             self.assertIn("--output-last-message", call["argv"])
+            self.assertTrue(call["stdin_is_devnull"], "codex exec blocks on an inherited non-TTY stdin")
             self.assertEqual(judge.cc_isolated.forbidden_env_keys(call["env"]), [])
+            self.assertEqual(out["layer_b"]["meta"]["tool_items"], 0)
+            self.assertEqual(out["layer_b"]["meta"]["usage"]["input_tokens"], 1000)
+            self.assertIn("fake", out["layer_b"]["meta"]["codex_version"])
             self.assertIn("INPUT:", call["argv"][-1])
             self.assertTrue(call["argv"][-1].startswith(judge.ACCURACY_RUBRIC[:40]))
             garbage = judge.CodexBackend(codex_bin=str(make_fake_codex(Path(tmp) / "bin2", "garbage")))
